@@ -1,176 +1,151 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
+if (session_status() === PHP_SESSION_NONE) session_start();
 include 'db.php';
 
-// Solo permitir acceso a admin
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+// Solo permitir acceso a administrador
+if (!isset($_SESSION['role']) || strtolower($_SESSION['role']) !== 'administrador') {
     die("⛔ Acceso denegado.");
 }
 
+// Filtros
 $usuario_filtro = $_GET['usuario'] ?? '';
-$condicion = $usuario_filtro ? "WHERE usuario LIKE '%" . $conn->real_escape_string($usuario_filtro) . "%'" : '';
+$tipo_filtro    = $_GET['tipo'] ?? '';
+$pagina         = isset($_GET['pagina']) && is_numeric($_GET['pagina']) && $_GET['pagina'] > 0 ? intval($_GET['pagina']) : 1;
+$limite         = 12;
+$offset         = ($pagina - 1) * $limite;
 
-$sql = "SELECT * FROM auditoria_productos $condicion ORDER BY fecha DESC";
-$result = $conn->query($sql);
+// WHERE dinámico
+$where = [];
+$params = [];
+$types  = '';
+
+if ($usuario_filtro) {
+    $where[]  = "u.Username LIKE ?";
+    $params[] = "%{$usuario_filtro}%";
+    $types   .= 's';
+}
+if ($tipo_filtro && in_array($tipo_filtro, ['producto', 'pedido'])) {
+    $where[]  = "a.Tabla = ?";
+    $params[] = $tipo_filtro;
+    $types   .= 's';
+} else {
+    $where[] = "(a.Tabla = 'producto' OR a.Tabla = 'pedido')";
+}
+$condicion = "WHERE " . implode(" AND ", $where);
+
+// Total para paginación
+$sql_total = "SELECT COUNT(*) FROM auditoria a LEFT JOIN usuario u ON a.IdUsuario = u.IdUsuario $condicion";
+$stmt_total = $conn->prepare($sql_total);
+if ($types !== '') $stmt_total->bind_param($types, ...$params);
+$stmt_total->execute();
+$stmt_total->bind_result($total_registros);
+$stmt_total->fetch();
+$stmt_total->close();
+$total_paginas = max(1, ceil($total_registros / $limite));
+
+// Consulta principal
+$sql = "SELECT a.*, u.Username AS Usuario
+        FROM auditoria a
+        LEFT JOIN usuario u ON a.IdUsuario = u.IdUsuario
+        $condicion
+        ORDER BY a.Fecha DESC
+        LIMIT ? OFFSET ?";
+$bindParams = $params;
+$bindTypes  = $types . 'ii';
+$bindParams[] = $limite;
+$bindParams[] = $offset;
+$stmt = $conn->prepare($sql);
+$refs = [];
+foreach ($bindParams as $key => $value) { $refs[$key] = &$bindParams[$key]; }
+call_user_func_array([$stmt, 'bind_param'], array_merge([$bindTypes], $refs));
+$stmt->execute();
+$result = $stmt->get_result();
+
+// Decodificar JSON seguro
+function safeJsonDecode($json) {
+    if (!$json || $json === "null") return null;
+    $data = json_decode($json, true);
+    if (json_last_error() !== JSON_ERROR_NONE) return null;
+    return $data;
+}
+
+// Etiqueta bonita según tabla
+function tipoRegistroBonito($tabla) {
+    if ($tabla === 'producto') return '<span style="color:#6ec5ff;">Producto</span>';
+    if ($tabla === 'pedido')   return '<span style="color:#ffe156;">Venta/Pedido</span>';
+    return $tabla;
+}
+
+// Mostrar detalles de productos para ventas
+function mostrarDetallePedido($datosNuevos) {
+    if (is_array($datosNuevos) && isset($datosNuevos[0]['IdProducto'])) {
+        $html = '';
+        foreach ($datosNuevos as $prod) {
+            $nombre   = htmlspecialchars($prod['Nombre'] ?? '-');
+            $cantidad = htmlspecialchars($prod['Cantidad'] ?? '-');
+            $precio   = isset($prod['PrecioUnitario']) ? '$'.number_format($prod['PrecioUnitario'],2) : '-';
+            $html .= "Producto #{$prod['IdProducto']} ({$cantidad} x {$precio})<br>";
+        }
+        return $html;
+    }
+    return '-';
+}
 ?>
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>📋 Auditoría Productos</title>
+    <title>📋 Auditoría General</title>
     <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #6a11cb, #2575fc);
-            padding: 30px;
-            color: #333;
-            min-height: 100vh;
-            margin: 0;
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #19191c; color: #eee; padding: 32px; }
+        .barra-superior { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+        a.btn { background: #007bff; color: white; padding: 8px 18px; border-radius: 6px; text-decoration: none; font-weight: 600; box-shadow: 0 2px 8px #4446; }
+        a.btn:hover { background: #0056b3; }
+        form { margin-bottom: 28px; display: flex; gap: 12px; align-items: center; }
+        input[type="text"], select { padding: 7px 12px; border-radius: 5px; border: none; background: #242434; color: #e9e9f1; width: 230px; }
+        button { padding: 8px 18px; border: none; border-radius: 5px; background: #30d158; color: white; font-weight: 600; cursor: pointer; margin-left: 8px;}
+        button:hover { background: #26ab45; }
+        a.limpiar { margin-left: 15px; color: #ffc107; text-decoration: none; font-weight: 600; }
+        a.limpiar:hover { text-decoration: underline; }
+        table { width: 100%; border-collapse: collapse; background: #25253a; border-radius: 10px; overflow: hidden; margin-bottom: 30px; }
+        th, td { padding: 11px 7px; text-align: center; border-bottom: 1px solid #39394d; font-size: 14px; }
+        th { background: #393952; font-weight: 700; }
+        tr:hover { background-color: #33334a; }
+        .json-mini { font-size: 12px; color: #bbb; background: #181829; border-radius: 4px; padding: 3px 7px; }
+        .paginacion { margin-top: 16px; text-align: center; }
+        .paginacion a, .paginacion span {
+            color: #eee; padding: 7px 13px; margin: 0 3px; text-decoration: none;
+            background: #23233a; border-radius: 7px; font-weight: 600; display: inline-block; cursor: pointer;
         }
-        h2 {
-            text-align: center;
-            color: #fff;
-            margin-bottom: 25px;
-            font-weight: 700;
-            text-shadow: 1px 1px 4px rgba(0,0,0,0.5);
+        .paginacion a:hover { background: #007bff; }
+        .paginacion .activo { background: #007bff; pointer-events: none; }
+        .json-view-btn {
+            background: #39394d; border: 1px solid #232345; color: #ffc107; border-radius: 5px;
+            font-size: 11px; padding: 2px 12px; cursor: pointer; margin-bottom: 3px;
         }
-        .barra-superior {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 25px;
-        }
-        .btn {
-            padding: 10px 18px;
-            border-radius: 6px;
-            text-decoration: none;
-            font-weight: 600;
-            color: white;
-            background-color: #ff6f61;
-            box-shadow: 0 4px 10px rgba(255,111,97,0.5);
-            transition: background-color 0.3s ease;
-        }
-        .btn:hover {
-            background-color: #ff4a36;
-            box-shadow: 0 6px 15px rgba(255,74,54,0.7);
-        }
-        form {
-            margin-bottom: 20px;
-            text-align: center;
-        }
-        input[type="text"] {
-            padding: 10px 14px;
-            width: 300px;
-            border-radius: 30px;
-            border: none;
-            box-shadow: 0 0 8px rgba(0,0,0,0.15);
-            font-size: 16px;
-            transition: box-shadow 0.3s ease;
-            outline: none;
-        }
-        input[type="text"]:focus {
-            box-shadow: 0 0 12px #ff6f61;
-        }
-        button {
-            padding: 10px 18px;
-            border: none;
-            background-color: #28a745;
-            color: white;
-            border-radius: 30px;
-            cursor: pointer;
-            font-weight: 600;
-            margin-left: 8px;
-            box-shadow: 0 4px 10px rgba(40,167,69,0.5);
-            transition: background-color 0.3s ease;
-            font-size: 16px;
-        }
-        button:hover {
-            background-color: #1e7e34;
-            box-shadow: 0 6px 15px rgba(30,126,52,0.7);
-        }
-        a.limpiar {
-            margin-left: 15px;
-            color: #ffc107;
-            font-weight: 600;
-            text-decoration: none;
-            transition: color 0.3s ease;
-        }
-        a.limpiar:hover {
-            color: #ffa000;
-            text-decoration: underline;
-        }
-        table {
-            width: 100%;
-            background: white;
-            border-collapse: separate;
-            border-spacing: 0 8px;
-            box-shadow: 0 0 30px rgba(0,0,0,0.15);
-            border-radius: 12px;
-            overflow: hidden;
-        }
-        thead th {
-            background-color: #2575fc;
-            color: white;
-            font-weight: 700;
-            padding: 14px 20px;
-            text-align: center;
-            letter-spacing: 0.05em;
-            border-bottom: 3px solid #1a56d4;
-        }
-        tbody tr {
-            background: #f9f9f9;
-            border-radius: 8px;
-            box-shadow: inset 0 0 5px rgba(0,0,0,0.03);
-            transition: background-color 0.3s ease;
-        }
-        tbody tr:hover {
-            background-color: #e0f0ff;
-            cursor: default;
-        }
-        tbody td {
-            padding: 14px 20px;
-            text-align: center;
-            color: #555;
-            font-weight: 500;
-        }
-        tbody td:first-child {
-            font-weight: 700;
-            color: #2575fc;
-        }
-        tbody td:nth-child(5), /* Precio */
-        tbody td:nth-child(7), /* Cantidad */
-        tbody td:nth-child(6) /* Acción */ {
-            font-weight: 600;
-            color: #333;
-        }
-        /* Responsive */
-        @media screen and (max-width: 960px) {
-            body {
-                padding: 15px;
-            }
-            input[type="text"] {
-                width: 70%;
-                max-width: 300px;
-            }
-            table {
-                font-size: 14px;
-            }
-        }
+        .tipo-label { font-size: 13px; font-weight: bold; }
     </style>
+    <script>
+        function toggleJson(id) {
+            var el = document.getElementById(id);
+            if (el.style.display === 'block') el.style.display = 'none';
+            else el.style.display = 'block';
+        }
+    </script>
 </head>
 <body>
-
 <div class="barra-superior">
-    <h2>📋 Auditoría de Productos</h2>
+    <h2>📋 Auditoría General</h2>
     <a href="listar_productos.php" class="btn">← Volver al panel</a>
 </div>
 
 <form method="GET" action="ver_auditoria.php">
     <input type="text" name="usuario" placeholder="Filtrar por usuario" value="<?= htmlspecialchars($usuario_filtro) ?>">
+    <select name="tipo">
+        <option value="">Todos</option>
+        <option value="producto" <?= $tipo_filtro=='producto'?'selected':''; ?>>Producto</option>
+        <option value="pedido" <?= $tipo_filtro=='pedido'?'selected':''; ?>>Venta/Pedido</option>
+    </select>
     <button type="submit">Buscar</button>
     <a href="ver_auditoria.php" class="limpiar">Limpiar filtro</a>
 </form>
@@ -180,41 +155,80 @@ $result = $conn->query($sql);
     <thead>
         <tr>
             <th>ID Auditoría</th>
+            <th>Tipo</th>
             <th>Usuario</th>
             <th>Acción</th>
             <th>Fecha</th>
-            <th>Descripción</th>
-            <th>Precio</th>
-            <th>Cantidad</th>
+            <th>ID Registro</th>
+            <th>Detalle Productos (solo ventas)</th>
+            <th>JSON Anterior</th>
+            <th>JSON Nuevo</th>
         </tr>
     </thead>
     <tbody>
-        <?php while ($row = $result->fetch_assoc()): 
-            // Decodificar JSON de datos nuevos o anteriores
-            $datos = json_decode($row['datos_nuevos'], true);
-            if (!$datos) {
-                $datos = json_decode($row['datos_anteriores'], true);
-            }
-
-            // Preparar valores para mostrar
-            $descripcion = $datos['descripcion'] ?? 'N/A';
-            $precio = isset($datos['precio']) ? number_format($datos['precio'], 2) : 'N/A';
-            $cantidad = $datos['cantidad'] ?? 'N/A';
-        ?>
+        <?php while ($row = $result->fetch_assoc()):
+            $datosNuevos     = safeJsonDecode($row['DatosNuevos']);
+            $datosAnteriores = safeJsonDecode($row['DatosAnteriores']);
+            $accion = strtoupper($row['Accion']);
+            $tabla  = $row['Tabla'];
+            $jsonAnteriorId = "ja_" . $row['IdAuditoria'];
+            $jsonNuevoId    = "jn_" . $row['IdAuditoria'];
+            ?>
         <tr>
-            <td><?= $row['id'] ?></td>
-            <td><?= htmlspecialchars($row['usuario']) ?></td>
-            <td><?= htmlspecialchars($row['accion']) ?></td>
-            <td><?= $row['fecha'] ?></td>
-            <td><?= htmlspecialchars($descripcion) ?></td>
-            <td>$<?= $precio ?></td>
-            <td><?= htmlspecialchars($cantidad) ?></td>
+            <td><?= htmlspecialchars($row['IdAuditoria']) ?></td>
+            <td class="tipo-label"><?= tipoRegistroBonito($tabla) ?></td>
+            <td><?= $row['Usuario'] ? htmlspecialchars($row['Usuario']) : '-' ?></td>
+            <td><?= htmlspecialchars($row['Accion']) ?></td>
+            <td><?= htmlspecialchars($row['Fecha']) ?></td>
+            <td><?= ($tabla=='producto') ? 'Producto #'.htmlspecialchars($row['IdRegistro']) : 'Venta #'.htmlspecialchars($row['IdRegistro']) ?></td>
+            <td>
+                <?php
+                if ($tabla === 'pedido') {
+                    echo mostrarDetallePedido($datosNuevos);
+                } else {
+                    echo '-';
+                }
+                ?>
+            </td>
+            <td>
+                <button type="button" class="json-view-btn" onclick="toggleJson('<?= $jsonAnteriorId ?>')">Ver</button>
+                <div id="<?= $jsonAnteriorId ?>" style="display:none;max-width:250px;overflow-x:auto;word-break:break-all;" class="json-mini">
+                    <?= htmlspecialchars($row['DatosAnteriores']) ?>
+                </div>
+            </td>
+            <td>
+                <button type="button" class="json-view-btn" onclick="toggleJson('<?= $jsonNuevoId ?>')">Ver</button>
+                <div id="<?= $jsonNuevoId ?>" style="display:none;max-width:250px;overflow-x:auto;word-break:break-all;" class="json-mini">
+                    <?= htmlspecialchars($row['DatosNuevos']) ?>
+                </div>
+            </td>
         </tr>
         <?php endwhile; ?>
     </tbody>
 </table>
+
+<div class="paginacion">
+    <?php if ($pagina > 1): ?>
+        <a href="?usuario=<?= urlencode($usuario_filtro) ?>&tipo=<?= urlencode($tipo_filtro) ?>&pagina=<?= $pagina - 1 ?>">← Anterior</a>
+    <?php else: ?>
+        <span style="opacity: 0.5;">← Anterior</span>
+    <?php endif; ?>
+    <?php for ($i = 1; $i <= $total_paginas; $i++): ?>
+        <?php if ($i == $pagina): ?>
+            <span class="activo"><?= $i ?></span>
+        <?php else: ?>
+            <a href="?usuario=<?= urlencode($usuario_filtro) ?>&tipo=<?= urlencode($tipo_filtro) ?>&pagina=<?= $i ?>"><?= $i ?></a>
+        <?php endif; ?>
+    <?php endfor; ?>
+    <?php if ($pagina < $total_paginas): ?>
+        <a href="?usuario=<?= urlencode($usuario_filtro) ?>&tipo=<?= urlencode($tipo_filtro) ?>&pagina=<?= $pagina + 1 ?>">Siguiente →</a>
+    <?php else: ?>
+        <span style="opacity: 0.5;">Siguiente →</span>
+    <?php endif; ?>
+</div>
+
 <?php else: ?>
-    <p style="color: white; text-align:center; font-size: 18px;">No se encontraron registros de auditoría.</p>
+    <p style="text-align:center; font-size: 18px;">No se encontraron registros de auditoría.</p>
 <?php endif; ?>
 
 </body>

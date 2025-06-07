@@ -1,4 +1,4 @@
-<?php
+<?php 
 include 'db.php';
 session_start();
 
@@ -9,33 +9,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $username = trim($_POST['username']);
     $correo = trim($_POST['correo']);
     $telefono = trim($_POST['telefono']);
-    $password = password_hash($_POST['password'], PASSWORD_DEFAULT);
+    $password_plano = $_POST['password'] ?? '';
 
-    // Validación básica
-    if ($username && $correo && $telefono && $password) {
+    // Validación básica de campos
+    if ($username && $correo && $telefono && $password_plano) {
 
-        // Verificar si el usuario o correo ya existen
-        $check = $conn->prepare("SELECT * FROM usuarios WHERE username = ? OR email = ?");
-        $check->bind_param("ss", $username, $correo);
-        $check->execute();
-        $res = $check->get_result();
-
-        if ($res->num_rows > 0) {
-            $error = "El nombre de usuario o correo ya está en uso.";
+        // Validar formato email
+        if (!filter_var($correo, FILTER_VALIDATE_EMAIL)) {
+            $error = "El correo electrónico no es válido.";
+        } elseif (strlen($password_plano) < 6) {
+            $error = "La contraseña debe tener al menos 6 caracteres.";
         } else {
-            $stmt = $conn->prepare("INSERT INTO usuarios (username, email, telefono, password, role) VALUES (?, ?, ?, ?, 'cliente')");
-            $stmt->bind_param("ssss", $username, $correo, $telefono, $password);
-            if ($stmt->execute()) {
-                $_SESSION['username'] = $username;
-                $_SESSION['role'] = 'cliente';
-                echo "<script>alert('Cuenta creada exitosamente'); window.location.href='ver_tienda.php';</script>";
-                exit;
+
+            // Hashear contraseña
+            $password = password_hash($password_plano, PASSWORD_DEFAULT);
+
+            // Verificar si el usuario o correo ya existen
+            $check = $conn->prepare("SELECT 1 FROM usuario WHERE Username = ? OR Email = ?");
+            if (!$check) {
+                $error = "Error en la consulta: " . $conn->error;
             } else {
-                $error = "Error al registrar: " . $stmt->error;
+                $check->bind_param("ss", $username, $correo);
+                $check->execute();
+                $res = $check->get_result();
+
+                if ($res->num_rows > 0) {
+                    $error = "El nombre de usuario o correo ya está en uso.";
+                } else {
+                    // Obtener IdRol para 'Cliente'
+                    $rolQuery = $conn->prepare("SELECT IdRol FROM rol WHERE LOWER(Nombre) = 'cliente' LIMIT 1");
+                    $rolQuery->execute();
+                    $rolResult = $rolQuery->get_result();
+                    if ($rolResult->num_rows === 1) {
+                        $rolRow = $rolResult->fetch_assoc();
+                        $idRol = $rolRow['IdRol'];
+                    } else {
+                        $error = "No se encontró el rol 'Cliente' en la base de datos.";
+                    }
+                    $rolQuery->close();
+
+                    // Insertar nuevo usuario
+                    if (!$error) {
+                        $stmt = $conn->prepare("INSERT INTO usuario (Username, Email, Telefono, Password, IdRol, IdEstatus, FechaCreacion) VALUES (?, ?, ?, ?, ?, 1, NOW())");
+                        if (!$stmt) {
+                            $error = "Error en la consulta: " . $conn->error;
+                        } else {
+                            $stmt->bind_param("ssssi", $username, $correo, $telefono, $password, $idRol);
+                            if ($stmt->execute()) {
+                                // Guardar sesión y redirigir
+                                $_SESSION['username'] = $username;
+                                $_SESSION['role'] = 'cliente';
+                                echo "<script>alert('Cuenta creada exitosamente'); window.location.href='ver_tienda.php';</script>";
+                                exit;
+                            } else {
+                                $error = "Error al registrar: " . $stmt->error;
+                            }
+                            $stmt->close();
+                        }
+                    }
+                }
+                $check->close();
             }
-            $stmt->close();
         }
-        $check->close();
     } else {
         $error = "Por favor, completa todos los campos.";
     }
@@ -61,6 +96,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         button {
             width: 100%; background-color: #28a745; color: white;
             padding: 12px; border: none; border-radius: 5px; font-weight: bold;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #218838;
         }
         .mensaje, .error { margin-top: 15px; text-align: center; }
         .mensaje { color: #007bff; }
@@ -71,27 +110,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <div class="registro-box">
     <h2>Crear cuenta</h2>
-    <form method="POST">
-        <label>Nombre de usuario:</label>
-        <input type="text" name="username" required>
+    <form method="POST" novalidate>
+        <label for="username">Nombre de usuario:</label>
+        <input type="text" id="username" name="username" required>
 
-        <label>Correo electrónico:</label>
-        <input type="email" name="correo" required>
+        <label for="correo">Correo electrónico:</label>
+        <input type="email" id="correo" name="correo" required>
 
-        <label>Teléfono:</label>
-        <input type="text" name="telefono" required>
+        <label for="telefono">Teléfono:</label>
+        <input type="text" id="telefono" name="telefono" required pattern="\d{10,15}" title="Solo números, entre 10 y 15 dígitos">
 
-        <label>Contraseña:</label>
-        <input type="password" name="password" required>
+        <label for="password">Contraseña:</label>
+        <input type="password" id="password" name="password" required minlength="6">
 
         <button type="submit">Registrarse</button>
     </form>
 
     <?php if ($mensaje): ?>
-        <p class="mensaje"><?= $mensaje ?></p>
+        <p class="mensaje"><?= htmlspecialchars($mensaje) ?></p>
     <?php endif; ?>
     <?php if ($error): ?>
-        <p class="error"><?= $error ?></p>
+        <p class="error"><?= htmlspecialchars($error) ?></p>
     <?php endif; ?>
 </div>
 

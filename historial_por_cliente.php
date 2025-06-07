@@ -2,7 +2,7 @@
 session_start();
 include 'db.php';
 
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+if (!isset($_SESSION['role']) || strtolower($_SESSION['role']) !== 'administrador') {
     header("Location: login.php");
     exit;
 }
@@ -11,21 +11,63 @@ $cliente = $_GET['cliente'] ?? '';
 $desde = $_GET['desde'] ?? '';
 $hasta = $_GET['hasta'] ?? '';
 
-$filtros = "WHERE 1=1";
-if ($cliente) $filtros .= " AND usuario LIKE '%$cliente%'";
-if ($desde) $filtros .= " AND fecha_pedido >= '$desde 00:00:00'";
-if ($hasta) $filtros .= " AND fecha_pedido <= '$hasta 23:59:59'";
+// Construir filtros con seguridad
+$where = [];
+$params = [];
+$types = '';
 
-$sql = "SELECT * FROM pedidos $filtros ORDER BY fecha_pedido DESC";
-$result = $conn->query($sql);
+if ($cliente) {
+    $where[] = "u.Username LIKE ?";
+    $params[] = "%$cliente%";
+    $types .= 's';
+}
+if ($desde) {
+    $where[] = "p.FechaPedido >= ?";
+    $params[] = "$desde 00:00:00";
+    $types .= 's';
+}
+if ($hasta) {
+    $where[] = "p.FechaPedido <= ?";
+    $params[] = "$hasta 23:59:59";
+    $types .= 's';
+}
 
-// Datos para la gráfica
-$grafica = $conn->query("SELECT DATE(fecha_pedido) as fecha, SUM(total) as total FROM pedidos $filtros GROUP BY DATE(fecha_pedido)");
+$filtros = count($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+
+// Consulta principal con JOIN para obtener usuario y método de pago
+$sql = "SELECT p.IdPedido, u.Username AS Usuario, p.FechaPedido, p.Total, m.Nombre AS MetodoPago, p.Entregado 
+        FROM pedido p
+        JOIN usuario u ON p.IdUsuario = u.IdUsuario
+        JOIN metodopago m ON p.IdMetodoPago = m.IdMetodoPago
+        $filtros
+        ORDER BY p.FechaPedido DESC";
+
+$stmt = $conn->prepare($sql);
+if ($types) {
+    $stmt->bind_param($types, ...$params);
+}
+$stmt->execute();
+$result = $stmt->get_result();
+
+// Consulta para la gráfica de totales diarios
+$sqlGrafica = "SELECT DATE(p.FechaPedido) AS Fecha, SUM(p.Total) AS Total
+               FROM pedido p
+               JOIN usuario u ON p.IdUsuario = u.IdUsuario
+               $filtros
+               GROUP BY DATE(p.FechaPedido)
+               ORDER BY Fecha ASC";
+$stmtGrafica = $conn->prepare($sqlGrafica);
+if ($types) {
+    $stmtGrafica->bind_param($types, ...$params);
+}
+$stmtGrafica->execute();
+$resGrafica = $stmtGrafica->get_result();
+
 $fechas = [];
 $totales = [];
-while ($row = $grafica->fetch_assoc()) {
-    $fechas[] = $row['fecha'];
-    $totales[] = $row['total'];
+while ($row = $resGrafica->fetch_assoc()) {
+    $fechas[] = $row['Fecha'];
+    $totales[] = $row['Total'];
 }
 ?>
 
@@ -46,7 +88,7 @@ while ($row = $grafica->fetch_assoc()) {
         input[type="date"], input[type="text"] {
             padding: 6px; border: 1px solid #ccc; border-radius: 5px; margin-right: 10px;
         }
-        button { padding: 6px 12px; background: #007bff; color: white; border: none; border-radius: 5px; }
+        button { padding: 6px 12px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
         .entregado { color: green; font-weight: bold; }
         .pendiente { color: orange; font-weight: bold; }
         .volver { margin-top: 20px; display: inline-block; background: #6c757d; color: white; padding: 10px; text-decoration: none; border-radius: 5px; }
@@ -58,8 +100,8 @@ while ($row = $grafica->fetch_assoc()) {
 <h2>📖 Historial de Compras por Cliente</h2>
 <form method="GET">
     <input type="text" name="cliente" placeholder="Nombre de usuario" value="<?= htmlspecialchars($cliente) ?>">
-    <label>Desde: <input type="date" name="desde" value="<?= $desde ?>"></label>
-    <label>Hasta: <input type="date" name="hasta" value="<?= $hasta ?>"></label>
+    <label>Desde: <input type="date" name="desde" value="<?= htmlspecialchars($desde) ?>"></label>
+    <label>Hasta: <input type="date" name="hasta" value="<?= htmlspecialchars($hasta) ?>"></label>
     <button type="submit">Buscar</button>
     <a href="historial_por_cliente.php" style="margin-left: 10px;">Limpiar</a>
 </form>
@@ -82,21 +124,27 @@ while ($row = $grafica->fetch_assoc()) {
     </tr>
     <?php while($row = $result->fetch_assoc()): ?>
         <tr>
-            <td><?= $row['id'] ?></td>
-            <td><?= $row['usuario'] ?></td>
-            <td><?= $row['fecha_pedido'] ?></td>
-            <td>$<?= number_format($row['total'], 2) ?></td>
-            <td><?= $row['metodo_pago'] ?></td>
-            <td><?= $row['entregado'] ? '<span class="entregado">Entregado</span>' : '<span class="pendiente">Pendiente</span>' ?></td>
-            <td><a href="?<?= http_build_query(array_merge($_GET, ['ver' => $row['id']])) ?>">Ver detalle</a></td>
+            <td><?= $row['IdPedido'] ?></td>
+            <td><?= htmlspecialchars($row['Usuario']) ?></td>
+            <td><?= $row['FechaPedido'] ?></td>
+            <td>$<?= number_format($row['Total'], 2) ?></td>
+            <td><?= htmlspecialchars($row['MetodoPago']) ?></td>
+            <td><?= $row['Entregado'] ? '<span class="entregado">Entregado</span>' : '<span class="pendiente">Pendiente</span>' ?></td>
+            <td><a href="?<?= http_build_query(array_merge($_GET, ['ver' => $row['IdPedido']])) ?>">Ver detalle</a></td>
         </tr>
-        <?php if (isset($_GET['ver']) && $_GET['ver'] == $row['id']):
-            $detalle = $conn->query("SELECT dp.*, p.Nombre FROM detalle_pedidos dp INNER JOIN productos p ON dp.producto_id = p.Id WHERE dp.pedido_id = " . $row['id']);
+        <?php if (isset($_GET['ver']) && $_GET['ver'] == $row['IdPedido']):
+            $detalle = $conn->prepare("SELECT dp.Cantidad, dp.PrecioUnitario, p.Nombre 
+                                       FROM detalle_pedido dp 
+                                       JOIN producto p ON dp.IdProducto = p.IdProducto 
+                                       WHERE dp.IdPedido = ?");
+            $detalle->bind_param("i", $row['IdPedido']);
+            $detalle->execute();
+            $resultadoDetalle = $detalle->get_result();
         ?>
         <tr>
             <td colspan="7">
                 <div class="detalle">
-                    <strong>Detalle del pedido #<?= $row['id'] ?>:</strong>
+                    <strong>Detalle del pedido #<?= $row['IdPedido'] ?>:</strong>
                     <table>
                         <tr>
                             <th>Producto</th>
@@ -104,19 +152,21 @@ while ($row = $grafica->fetch_assoc()) {
                             <th>Precio Unitario</th>
                             <th>Subtotal</th>
                         </tr>
-                        <?php while($det = $detalle->fetch_assoc()): ?>
+                        <?php while($det = $resultadoDetalle->fetch_assoc()): ?>
                             <tr>
-                                <td><?= $det['Nombre'] ?></td>
-                                <td><?= $det['cantidad'] ?></td>
-                                <td>$<?= number_format($det['precio_unitario'], 2) ?></td>
-                                <td>$<?= number_format($det['precio_unitario'] * $det['cantidad'], 2) ?></td>
+                                <td><?= htmlspecialchars($det['Nombre']) ?></td>
+                                <td><?= $det['Cantidad'] ?></td>
+                                <td>$<?= number_format($det['PrecioUnitario'], 2) ?></td>
+                                <td>$<?= number_format($det['PrecioUnitario'] * $det['Cantidad'], 2) ?></td>
                             </tr>
                         <?php endwhile; ?>
                     </table>
                 </div>
             </td>
         </tr>
-        <?php endif; ?>
+        <?php 
+            $detalle->close();
+        endif; ?>
     <?php endwhile; ?>
 </table>
 <?php else: ?>

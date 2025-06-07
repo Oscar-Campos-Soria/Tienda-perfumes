@@ -1,4 +1,5 @@
 <?php
+// Activar reporte de errores para depuración
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
@@ -7,81 +8,82 @@ session_start();
 include 'db.php';
 include 'log_helper.php';
 
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
-    die("⛔ Acceso no autorizado.");
+if (!isset($_SESSION['role']) || strtolower($_SESSION['role']) !== 'administrador') {
+    die("⛔ Acceso denegado.");
 }
 
-if (
-    empty($_POST['nombre']) || empty($_POST['descripcion']) ||
-    empty($_POST['precio']) || empty($_POST['cantidad']) ||
-    empty($_POST['categoria']) || empty($_POST['presentacion'])
-) {
-    echo "<script>alert('❌ Todos los campos son obligatorios.'); history.back();</script>";
-    exit;
+$id_usuario_crea = $_SESSION['id_usuario'] ?? null;
+if ($id_usuario_crea === null) {
+    die("⛔ Usuario no autenticado correctamente.");
 }
 
-$nombre = htmlspecialchars(trim($_POST['nombre']));
-$descripcion = htmlspecialchars(trim($_POST['descripcion']));
-$precio = floatval($_POST['precio']);
-$cantidad = intval($_POST['cantidad']);
-$categoria = htmlspecialchars(trim($_POST['categoria']));
-$presentacion = htmlspecialchars(trim($_POST['presentacion']));
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Obtener datos del formulario
+    $nombre = trim($_POST['nombre']);
+    $descripcion = trim($_POST['descripcion']);
+    $precio = floatval($_POST['precio']);
+    $cantidad = intval($_POST['cantidad']);
+    $categoria = trim($_POST['categoria']);
+    $presentacion = intval($_POST['presentacion']);
+    $id_estatus = 1; // Estatus por defecto (activo)
 
-if (isset($_FILES['imagen']) && $_FILES['imagen']['error'] === UPLOAD_ERR_OK) {
-    $imagen_tmp = $_FILES['imagen']['tmp_name'];
-    $tipo = mime_content_type($imagen_tmp);
+    // Validar imagen subida
+    if (!isset($_FILES['imagen']) || $_FILES['imagen']['error'] !== UPLOAD_ERR_OK) {
+        die("❌ Error al subir la imagen.");
+    }
+
+    $permitidos = ['image/jpeg', 'image/png', 'image/webp'];
+    $tipo = mime_content_type($_FILES['imagen']['tmp_name']);
     $tamano = $_FILES['imagen']['size'];
-    $permitidos = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    $maximo = 2 * 1024 * 1024;
 
     if (!in_array($tipo, $permitidos)) {
-        echo "<script>alert('❌ Tipo de imagen no permitido. Usa JPG, PNG, GIF o WEBP.'); history.back();</script>";
-        exit;
+        die("❌ Tipo de imagen no permitido. Usa JPG, PNG o WEBP.");
     }
 
-    if ($tamano > $maximo) {
-        echo "<script>alert('❌ La imagen excede el tamaño máximo de 2MB.'); history.back();</script>";
-        exit;
+    if ($tamano > 2 * 1024 * 1024) {
+        die("❌ La imagen supera los 2MB.");
     }
 
+    // Procesar imagen
     $ext = pathinfo($_FILES['imagen']['name'], PATHINFO_EXTENSION);
-    $nombre_imagen = uniqid('perfume_') . '.' . strtolower($ext);
-    $ruta_destino = __DIR__ . '/imagenes/' . $nombre_imagen;
+    $nombre_imagen = uniqid('perfume_') . '.' . $ext;
+    $ruta_destino = 'imagenes/' . $nombre_imagen;
 
-    if (!move_uploaded_file($imagen_tmp, $ruta_destino)) {
-        echo "<h2 style='color:red;'>❌ Error al mover la imagen al servidor.</h2>";
-        echo "<p>Revisa permisos de la carpeta 'imagenes/' y que la ruta sea correcta.</p>";
-        exit;
+    if (!move_uploaded_file($_FILES['imagen']['tmp_name'], $ruta_destino)) {
+        die("❌ Error al guardar la imagen.");
     }
 
-    // Aquí la consulta corregida, sin producto_id:
-    $stmt = $conn->prepare("INSERT INTO productos (Nombre, descripcion, Precio, Cantidad, Categoria, Presentacion, imagen) VALUES (?, ?, ?, ?, ?, ?, ?)");
-    if ($stmt === false) {
-        die("Error en prepare(): " . htmlspecialchars($conn->error));
+    // Insertar producto, incluyendo IdUsuarioCrea
+    $sql = "INSERT INTO producto 
+            (Nombre, Descripcion, Precio, Cantidad, Categoria, IdPresentacion, Imagen, IdEstatus, IdUsuarioCrea) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
+        die("❌ Error al preparar la consulta: " . $conn->error);
     }
-    $stmt->bind_param("ssdisss", $nombre, $descripcion, $precio, $cantidad, $categoria, $presentacion, $nombre_imagen);
+
+    $stmt->bind_param("ssdisssii", 
+        $nombre, 
+        $descripcion, 
+        $precio, 
+        $cantidad, 
+        $categoria, 
+        $presentacion, 
+        $nombre_imagen, 
+        $id_estatus,
+        $id_usuario_crea
+    );
 
     if ($stmt->execute()) {
-        $id_insertado = $stmt->insert_id;
-        $usuario = $_SESSION['username'] ?? 'desconocido';
-        $accion = "Agregó el producto '$nombre' con ID $id_insertado";
-        registrar_log($conn, $usuario, $accion);
-
-        echo "<script>
-                alert('✅ Producto agregado correctamente.');
-                setTimeout(function() {
-                    window.location.href = 'listar_productos.php';
-                }, 800);
-              </script>";
+        // No registrar log aquí, el trigger lo hace para INSERT
+        echo "<script>alert('✅ Producto agregado correctamente.'); window.location.href = 'listar_productos.php';</script>";
     } else {
-        echo "<h2 style='color:red;'>❌ Error al guardar en la base de datos: " . htmlspecialchars($stmt->error) . "</h2>";
-        exit;
+        echo "<script>alert('❌ Error al guardar producto: {$stmt->error}'); window.location.href = 'form_agregar.php';</script>";
     }
+
     $stmt->close();
 } else {
-    echo "<h2 style='color:red;'>❌ Debes subir una imagen válida.</h2>";
+    header('Location: form_agregar.php');
     exit;
 }
-
-$conn->close();
-?>

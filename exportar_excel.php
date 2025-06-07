@@ -2,12 +2,14 @@
 session_start();
 include 'db.php';
 
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+if (!isset($_SESSION['role']) || strtolower($_SESSION['role']) !== 'administrador') {
     die("⛔ Acceso denegado.");
 }
 
 header("Content-Type: application/vnd.ms-excel");
 header("Content-Disposition: attachment; filename=reporte_pedidos.xls");
+
+// Encabezados de tabla
 echo "<table border='1'>";
 echo "<tr>
         <th>ID Pedido</th>
@@ -22,27 +24,29 @@ echo "<tr>
         <th>Estado</th>
       </tr>";
 
-$sql = "SELECT p.id, p.usuario, p.fecha_pedido, p.total, p.metodo_pago, p.entregado,
-               d.producto_id, d.cantidad, d.precio_unitario, pr.Nombre
-        FROM pedidos p
-        JOIN detalle_pedidos d ON p.id = d.pedido_id
-        JOIN productos pr ON d.producto_id = pr.Id
-        ORDER BY p.fecha_pedido DESC";
+// Consulta con nombres correctos (singular y camelCase)
+$sql = "SELECT p.IdPedido, p.Usuario, p.FechaPedido, p.Total, p.MetodoPago, p.Entregado,
+               d.IdProducto, d.Cantidad, d.PrecioUnitario, pr.Nombre
+        FROM pedido p
+        JOIN detalle_pedido d ON p.IdPedido = d.IdPedido
+        JOIN producto pr ON d.IdProducto = pr.IdProducto
+        ORDER BY p.FechaPedido DESC";
 
 $resultado = $conn->query($sql);
 
 while ($row = $resultado->fetch_assoc()) {
+    $subtotal = $row['PrecioUnitario'] * $row['Cantidad'];
     echo "<tr>
-            <td>{$row['id']}</td>
-            <td>{$row['usuario']}</td>
-            <td>{$row['fecha_pedido']}</td>
-            <td>\${$row['total']}</td>
-            <td>{$row['Nombre']}</td>
-            <td>{$row['cantidad']}</td>
-            <td>\${$row['precio_unitario']}</td>
-            <td>\$" . number_format($row['precio_unitario'] * $row['cantidad'], 2) . "</td>
-            <td>{$row['metodo_pago']}</td>
-            <td>" . ($row['entregado'] ? 'Entregado' : 'Pendiente') . "</td>
+            <td>{$row['IdPedido']}</td>
+            <td>" . htmlspecialchars($row['Usuario']) . "</td>
+            <td>{$row['FechaPedido']}</td>
+            <td>$" . number_format($row['Total'], 2) . "</td>
+            <td>" . htmlspecialchars($row['Nombre']) . "</td>
+            <td>{$row['Cantidad']}</td>
+            <td>$" . number_format($row['PrecioUnitario'], 2) . "</td>
+            <td>$" . number_format($subtotal, 2) . "</td>
+            <td>" . htmlspecialchars($row['MetodoPago']) . "</td>
+            <td>" . ($row['Entregado'] ? 'Entregado' : 'Pendiente') . "</td>
           </tr>";
 }
 echo "</table>";

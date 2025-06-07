@@ -1,8 +1,8 @@
-<?php
+<?php 
 session_start();
 include 'db.php';
 
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+if (!isset($_SESSION['role']) || strtolower($_SESSION['role']) !== 'administrador') {
     header("Location: login.php");
     exit;
 }
@@ -13,65 +13,123 @@ require 'vendor/autoload.php';
 
 // Marcar pedido como entregado y enviar correo
 if (isset($_GET['entregar'])) {
-    $id = $_GET['entregar'];
-    $conn->query("UPDATE pedidos SET entregado = 1 WHERE id = $id");
+    $id = intval($_GET['entregar']);
 
-    $pedido = $conn->query("SELECT * FROM pedidos WHERE id = $id")->fetch_assoc();
-    $usuario = $pedido['usuario'];
-    $correo = $conn->query("SELECT email FROM usuarios WHERE username = '$usuario'")->fetch_assoc()['email'];
+    // Actualizar estatus a entregado (IdEstatus = 4)
+    $stmt = $conn->prepare("UPDATE pedido SET IdEstatus = 4 WHERE IdPedido = ?");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $stmt->close();
 
-    $mail = new PHPMailer(true);
-    try {
-        $mail->isSMTP();
-        $mail->Host = 'smtp.tucorreo.com';
-        $mail->SMTPAuth = true;
-        $mail->Username = 'tucorreo@dominio.com';
-        $mail->Password = 'tu_contraseña';
-        $mail->SMTPSecure = 'tls';
-        $mail->Port = 587;
+    // Obtener datos del pedido y usuario
+    $stmt = $conn->prepare("
+        SELECT p.Referencia, u.Username, u.Email
+        FROM pedido p
+        JOIN usuario u ON p.IdUsuario = u.IdUsuario
+        WHERE p.IdPedido = ?");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $pedido = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
 
-        $mail->setFrom('tucorreo@dominio.com', 'Tienda de Perfumes');
-        $mail->addAddress($correo);
-        $mail->Subject = 'Pedido entregado';
-        $mail->Body = "Hola $usuario, tu pedido con referencia {$pedido['referencia']} ha sido entregado.\n\nGracias por tu compra.";
+    if ($pedido) {
+        $mail = new PHPMailer(true);
+        try {
+            $mail->isSMTP();
+            $mail->Host = 'smtp.tucorreo.com'; // Cambia esto por tu servidor SMTP real
+            $mail->SMTPAuth = true;
+            $mail->Username = 'tucorreo@dominio.com'; // Cambia por tu usuario SMTP
+            $mail->Password = 'tu_contraseña'; // Cambia por tu contraseña SMTP
+            $mail->SMTPSecure = 'tls';
+            $mail->Port = 587;
 
-        $mail->send();
-    } catch (Exception $e) {
-        // Log error o ignorar
+            $mail->setFrom('tucorreo@dominio.com', 'Tienda de Perfumes');
+            $mail->addAddress($pedido['Email'], $pedido['Username']);
+            $mail->Subject = 'Pedido entregado';
+            $mail->Body = "Hola {$pedido['Username']}, tu pedido con referencia {$pedido['Referencia']} ha sido entregado.\n\nGracias por tu compra.";
+
+            $mail->send();
+        } catch (Exception $e) {
+            // Puedes registrar el error en un log si quieres
+        }
     }
 }
 
+// Filtros y orden
 $cliente = $_GET['cliente'] ?? '';
 $desde = $_GET['desde'] ?? '';
 $hasta = $_GET['hasta'] ?? '';
-$order = $_GET['orden'] === 'asc' ? 'ASC' : 'DESC';
+$order = (isset($_GET['orden']) && $_GET['orden'] === 'asc') ? 'ASC' : 'DESC';
 
 $where = [];
-if ($cliente) $where[] = "usuario LIKE '%$cliente%'";
-if ($desde) $where[] = "fecha_pedido >= '$desde 00:00:00'";
-if ($hasta) $where[] = "fecha_pedido <= '$hasta 23:59:59'";
+$params = [];
+$types = '';
 
-$condicion = count($where) ? 'WHERE ' . implode(' AND ', $where) : '';
-$sql = "SELECT * FROM pedidos $condicion ORDER BY total $order";
-$result = $conn->query($sql);
+if ($cliente) {
+    $where[] = "u.Username LIKE ?";
+    $params[] = "%$cliente%";
+    $types .= 's';
+}
+if ($desde) {
+    $where[] = "p.FechaPedido >= ?";
+    $params[] = "$desde 00:00:00";
+    $types .= 's';
+}
+if ($hasta) {
+    $where[] = "p.FechaPedido <= ?";
+    $params[] = "$hasta 23:59:59";
+    $types .= 's';
+}
 
-$grafica = $conn->query("SELECT DATE(fecha_pedido) as fecha, SUM(total) as total FROM pedidos $condicion GROUP BY DATE(fecha_pedido)");
+$condicion = count($where) ? "WHERE " . implode(' AND ', $where) : "";
+
+// Preparar y ejecutar consulta con JOIN
+$sql = "SELECT p.*, u.Username, u.Email, m.Nombre AS MetodoPago, e.Nombre AS Estatus
+        FROM pedido p
+        JOIN usuario u ON p.IdUsuario = u.IdUsuario
+        JOIN metodopago m ON p.IdMetodoPago = m.IdMetodoPago
+        JOIN estatus e ON p.IdEstatus = e.IdEstatus
+        $condicion
+        ORDER BY p.Total $order";
+
+$stmt = $conn->prepare($sql);
+if ($params) {
+    $stmt->bind_param($types, ...$params);
+}
+$stmt->execute();
+$result = $stmt->get_result();
+
+// Datos para gráfica
+$sql_graf = "SELECT DATE(FechaPedido) as fecha, SUM(Total) as total 
+             FROM pedido p
+             $condicion
+             GROUP BY DATE(FechaPedido)";
+$stmt_graf = $conn->prepare($sql_graf);
+if ($params) {
+    $stmt_graf->bind_param($types, ...$params);
+}
+$stmt_graf->execute();
+$grafica = $stmt_graf->get_result();
+
 $fechas = [];
 $totales = [];
 while ($g = $grafica->fetch_assoc()) {
     $fechas[] = $g['fecha'];
     $totales[] = $g['total'];
 }
+
+$stmt->close();
+$stmt_graf->close();
 ?>
 
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>Panel de Administrador</title>
+    <title>Panel de Administrador - Pedidos</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body { font-family: Arial; padding: 20px; background-color: #f2f2f2; }
+        body { font-family: Arial, sans-serif; padding: 20px; background-color: #f2f2f2; }
         h2 { color: #333; }
         form, .filtros { margin-top: 15px; }
         input[type="text"], input[type="date"] {
@@ -102,8 +160,8 @@ while ($g = $grafica->fetch_assoc()) {
 
 <form method="GET">
     <input type="text" name="cliente" placeholder="Buscar cliente" value="<?= htmlspecialchars($cliente) ?>">
-    <input type="date" name="desde" value="<?= $desde ?>">
-    <input type="date" name="hasta" value="<?= $hasta ?>">
+    <input type="date" name="desde" value="<?= htmlspecialchars($desde) ?>">
+    <input type="date" name="hasta" value="<?= htmlspecialchars($hasta) ?>">
     <button type="submit">Filtrar</button>
     <a href="admin_pedidos.php" style="margin-left: 10px;">Limpiar</a>
 </form>
@@ -130,31 +188,43 @@ while ($g = $grafica->fetch_assoc()) {
         <th>Estado</th>
         <th>Acciones</th>
     </tr>
-    <?php while($row = $result->fetch_assoc()): ?>
+    <?php while ($row = $result->fetch_assoc()): ?>
         <tr>
-            <td><?= $row['id'] ?></td>
-            <td><?= $row['usuario'] ?></td>
-            <td>$<?= number_format($row['total'], 2) ?></td>
-            <td><?= $row['referencia'] ?></td>
-            <td><?= $row['fecha_pedido'] ?></td>
-            <td><?= $row['metodo_pago'] ?></td>
+            <td><?= $row['IdPedido'] ?></td>
+            <td><?= htmlspecialchars($row['Username']) ?></td>
+            <td>$<?= number_format($row['Total'], 2) ?></td>
+            <td><?= htmlspecialchars($row['Referencia']) ?></td>
+            <td><?= htmlspecialchars($row['FechaPedido']) ?></td>
+            <td><?= htmlspecialchars($row['MetodoPago']) ?></td>
             <td>
-                <?= $row['entregado'] ? '<span class="entregado">Entregado</span>' : '<span class="pendiente">Pendiente</span>' ?>
+                <?php
+                if ($row['IdEstatus'] == 4) {
+                    echo '<span class="entregado">Entregado</span>';
+                } elseif ($row['IdEstatus'] == 5) {
+                    echo '<span class="pendiente">No Enviado</span>';
+                } elseif ($row['IdEstatus'] == 6) {
+                    echo '<span class="pendiente">Cancelado</span>';
+                } else {
+                    echo htmlspecialchars($row['Estatus']);
+                }
+                ?>
             </td>
             <td>
-                <?php if (!$row['entregado']): ?>
-                    <a class="btn btn-entregar" href="admin_pedidos.php?entregar=<?= $row['id'] ?>">Marcar como entregado</a><br><br>
+                <?php if ($row['IdEstatus'] != 4): ?>
+                    <a class="btn btn-entregar" href="admin_pedidos.php?entregar=<?= $row['IdPedido'] ?>">Marcar como entregado</a><br><br>
                 <?php endif; ?>
-                <a class="btn btn-detalle" href="?<?= http_build_query(array_merge($_GET, ['ver' => $row['id']])) ?>">Ver detalle</a>
+                <a class="btn btn-detalle" href="?<?= http_build_query(array_merge($_GET, ['ver' => $row['IdPedido']])) ?>">Ver detalle</a>
             </td>
         </tr>
-        <?php if (isset($_GET['ver']) && $_GET['ver'] == $row['id']):
-            $detalle = $conn->query("SELECT dp.*, p.Nombre FROM detalle_pedidos dp INNER JOIN productos p ON dp.producto_id = p.Id WHERE dp.pedido_id = " . $row['id']);
-        ?>
+
+        <?php if (isset($_GET['ver']) && $_GET['ver'] == $row['IdPedido']):
+            $detalle = $conn->query("SELECT pd.*, pr.Nombre FROM pedidodetalle pd 
+                INNER JOIN producto pr ON pd.IdProducto = pr.IdProducto 
+                WHERE pd.IdPedido = " . intval($row['IdPedido'])); ?>
         <tr>
             <td colspan="8">
                 <div class="detalle">
-                    <strong>Detalle del Pedido #<?= $row['id'] ?>:</strong>
+                    <strong>Detalle del Pedido #<?= $row['IdPedido'] ?>:</strong>
                     <table>
                         <tr>
                             <th>Producto</th>
@@ -164,10 +234,10 @@ while ($g = $grafica->fetch_assoc()) {
                         </tr>
                         <?php while ($det = $detalle->fetch_assoc()): ?>
                         <tr>
-                            <td><?= $det['Nombre'] ?></td>
-                            <td><?= $det['cantidad'] ?></td>
-                            <td>$<?= number_format($det['precio_unitario'], 2) ?></td>
-                            <td>$<?= number_format($det['precio_unitario'] * $det['cantidad'], 2) ?></td>
+                            <td><?= htmlspecialchars($det['Nombre']) ?></td>
+                            <td><?= $det['Cantidad'] ?></td>
+                            <td>$<?= number_format($det['PrecioUnitario'], 2) ?></td>
+                            <td>$<?= number_format($det['PrecioUnitario'] * $det['Cantidad'], 2) ?></td>
                         </tr>
                         <?php endwhile; ?>
                     </table>
@@ -179,26 +249,25 @@ while ($g = $grafica->fetch_assoc()) {
 </table>
 
 <script>
-    const ctx = document.getElementById('grafico').getContext('2d');
-    const chart = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: <?= json_encode($fechas) ?>,
-            datasets: [{
-                label: 'Total de Ventas ($)',
-                data: <?= json_encode($totales) ?>,
-                backgroundColor: 'rgba(0, 123, 255, 0.7)'
-            }]
-        },
-        options: {
-            responsive: true,
-            scales: {
-                y: { beginAtZero: true }
-            }
+const ctx = document.getElementById('grafico').getContext('2d');
+const chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+        labels: <?= json_encode($fechas) ?>,
+        datasets: [{
+            label: 'Total de Ventas ($)',
+            data: <?= json_encode($totales) ?>,
+            backgroundColor: 'rgba(0, 123, 255, 0.7)'
+        }]
+    },
+    options: {
+        responsive: true,
+        scales: {
+            y: { beginAtZero: true }
         }
-    });
+    }
+});
 </script>
 
 </body>
 </html>
-

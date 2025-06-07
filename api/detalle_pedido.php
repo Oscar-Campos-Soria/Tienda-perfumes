@@ -2,25 +2,42 @@
 header('Content-Type: application/json');
 require_once '../db.php';
 
-$pedido_id = intval($_GET['pedido_id'] ?? 0);
+$idPedido = isset($_GET['pedido_id']) ? intval($_GET['pedido_id']) : 0;
+
+if ($idPedido <= 0) {
+    echo json_encode(['success' => false, 'error' => 'ID de pedido no válido o no proporcionado']);
+    exit;
+}
 
 try {
-    $sql = "SELECT p.Nombre, dp.cantidad, dp.precio_unitario
-            FROM detalle_pedidos dp
-            JOIN productos p ON dp.producto_id = p.Id
-            WHERE dp.pedido_id = ?";
+    // Preparar la consulta con parámetros
+    $sql = "SELECT p.Nombre, dp.Cantidad, dp.PrecioUnitario
+            FROM detalle_pedido dp
+            JOIN producto p ON dp.IdProducto = p.IdProducto
+            WHERE dp.IdPedido = ?";
     $stmt = $conn->prepare($sql);
-    $stmt->bind_param("i", $pedido_id);
+    
+    if (!$stmt) {
+        throw new Exception("Error en la preparación de la consulta: " . $conn->error);
+    }
+    
+    $stmt->bind_param("i", $idPedido);
     $stmt->execute();
     $res = $stmt->get_result();
-
-    $detalles = [];
-    while ($row = $res->fetch_assoc()) {
-        $detalles[] = $row;
+    
+    // Verificar si se obtuvieron resultados
+    if ($res->num_rows > 0) {
+        $detalles = [];
+        while ($row = $res->fetch_assoc()) {
+            $detalles[] = $row;
+        }
+        echo json_encode(['success' => true, 'data' => $detalles], JSON_UNESCAPED_UNICODE);
+    } else {
+        echo json_encode(['success' => false, 'message' => 'No se encontraron detalles para este pedido.']);
     }
 
-    echo json_encode(['success' => true, 'data' => $detalles]);
 } catch (Exception $e) {
     http_response_code(500);
-    echo json_encode(['success' => false, 'error' => 'Error al obtener detalles']);
+    echo json_encode(['success' => false, 'error' => 'Error al obtener detalles: ' . $e->getMessage()]);
 }
+?>

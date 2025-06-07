@@ -1,137 +1,133 @@
 <?php
 session_start();
-include 'db.php';
+header('Content-Type: application/json');
+require_once '../db.php';
 
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'cliente') {
-    header("Location: login.php");
+// Validar sesión activa de cliente
+if (!isset($_SESSION['role']) || strtolower($_SESSION['role']) !== 'cliente') {
+    echo json_encode(['success' => false, 'message' => 'No autorizado']);
     exit;
 }
 
-if (!isset($_SESSION['carrito'])) {
-    $_SESSION['carrito'] = [];
+// Obtener datos JSON
+$input = json_decode(file_get_contents('php://input'), true);
+if (!isset($input['producto']) || empty($input['producto'])) {
+    echo json_encode(['success' => false, 'message' => 'Carrito vacío o mal enviado']);
+    exit;
 }
 
-$productos = [];
-if (!empty($_SESSION['carrito'])) {
-    $ids = implode(',', array_keys($_SESSION['carrito']));
-    $sql = "SELECT * FROM productos WHERE Id IN ($ids)";
-    $result = $conn->query($sql);
+// Validar método de pago
+$IdMetodoPago = $input['metodo_pago'] ?? 'efectivo';
+if (!in_array($IdMetodoPago, ['efectivo', 'transferencia'])) {
+    echo json_encode(['success' => false, 'message' => 'Método de pago inválido']);
+    exit;
+}
 
-    while ($row = $result->fetch_assoc()) {
-        $productos[$row['Id']] = $row;
+// Variables necesarias
+$idUsuario = $_SESSION['id_usuario'] ?? '';  // Usar el ID de usuario desde la sesión
+if (trim($idUsuario) === '') {
+    echo json_encode(['success' => false, 'message' => 'ID de usuario no disponible']);
+    exit;
+}
+
+$referencia = strtoupper(uniqid("PED"));
+$fecha = date('Y-m-d H:i:s');
+$total = 0.0;
+$carrito = $input['producto'];
+
+// Calcular total de producto (usando tabla "producto" y campos CamelCase)
+foreach ($carrito as $item) {
+    $id = intval($item['id']);
+    $cantidad = intval($item['cantidad']);
+    if ($cantidad <= 0) continue;
+
+    $stmt = $conn->prepare("SELECT Precio FROM producto WHERE IdProducto = ?");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $res = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if ($res && isset($res['Precio'])) {
+        $total += floatval($res['Precio']) * $cantidad;
     }
 }
+
+if ($total <= 0) {
+    echo json_encode(['success' => false, 'message' => 'Total inválido o vacío']);
+    exit;
+}
+
+// Insertar pedido principal en tabla "pedido"
+$stmt = $conn->prepare("INSERT INTO pedido (IdUsuario, Total, Referencia, FechaPedido, IdMetodoPago) VALUES (?, ?, ?, ?, ?)");
+if (!$stmt) {
+    echo json_encode(['success' => false, 'message' => 'Error al preparar el pedido: ' . $conn->error]);
+    exit;
+}
+$stmt->bind_param("idsss", $idUsuario, $total, $referencia, $fecha, $metodoPago);
+if (!$stmt->execute()) {
+    echo json_encode(['success' => false, 'message' => 'Error al registrar el pedido: ' . $stmt->error]);
+    exit;
+}
+$idPedido = $stmt->insert_id;
+$stmt->close();
+
+// Insertar productos del pedido y actualizar inventario (tablas y campos actualizados)
+foreach ($carrito as $item) {
+    $idProducto = intval($item['id']);
+    $cantidad = intval($item['cantidad']);
+    if ($cantidad <= 0) continue;
+
+    $stmt = $conn->prepare("SELECT Precio FROM producto WHERE IdProducto = ?");
+    $stmt->bind_param("i", $idProducto);
+    $stmt->execute();
+    $res = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if ($res && isset($res['Precio'])) {
+        $precioUnitario = floatval($res['Precio']);
+
+        // Insertar detalle del pedido
+        $stmt = $conn->prepare("INSERT INTO detalle_pedido (IdPedido, IdProducto, Cantidad, PrecioUnitario) VALUES (?, ?, ?, ?)");
+        if (!$stmt) {
+            echo json_encode(['success' => false, 'message' => 'Error al preparar detalle: ' . $conn->error]);
+            exit;
+        }
+        $stmt->bind_param("iiid", $idPedido, $idProducto, $cantidad, $precioUnitario);
+        $stmt->execute();
+        $stmt->close();
+
+        // Actualizar inventario
+        $stmt = $conn->prepare("UPDATE producto SET Cantidad = Cantidad - ? WHERE IdProducto = ?");
+        $stmt->bind_param("ii", $cantidad, $idProducto);
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
+// Limpiar carrito de la sesión si se usó (opcional)
+$_SESSION['carrito'] = [];
+
+// Preparar respuesta para frontend
+echo json_encode([
+    'success' => true,
+    'message' => 'Compra realizada con éxito',
+    'referencia' => $referencia,
+    'metodo_pago' => $metodoPago,
+    'total' => number_format($total, 2),
+    'instrucciones_pago' => $metodoPago === 'transferencia' ? [
+        'Banco' => 'BANCO FICTICIO S.A.',
+        'Cuenta' => '1234 5678 9012 3456',
+        'CLABE' => '012345678901234567',
+        'Beneficiario' => 'Perfime Tienda Virtual',
+        'Referencia' => $referencia,
+        'Nota' => 'Una vez realizada la transferencia, recibirás un correo de confirmación.',
+        'Confirmacion' => 'Confirmaremos tu pedido en cuanto verifiquemos la transferencia bancaria.'
+    ] : [
+        'Instrucciones' => 'Presenta esta referencia al momento de pagar en efectivo en tienda física.',
+        'Referencia' => $referencia,
+        'Nota' => 'También recibirás un correo con la información de tu compra.',
+        'Confirmacion' => 'Se te cobrará al momento de la entrega o al recoger tu pedido.'
+    ]
+], JSON_UNESCAPED_UNICODE);
 ?>
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <title>Carrito de Compras</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f6f6f6;
-            padding: 30px;
-        }
-        h2 {
-            color: #444;
-        }
-        table {
-            width: 100%;
-            background: #fff;
-            border-collapse: collapse;
-            margin-top: 20px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-        }
-        th, td {
-            padding: 12px;
-            border: 1px solid #ddd;
-            text-align: center;
-        }
-        th {
-            background-color: #ddd;
-        }
-        input[type="number"] {
-            width: 60px;
-            padding: 5px;
-        }
-        .total {
-            text-align: right;
-            margin-top: 20px;
-            font-size: 1.2em;
-        }
-        .btn {
-            background-color: #4CAF50;
-            color: white;
-            padding: 10px 18px;
-            border: none;
-            border-radius: 5px;
-            text-decoration: none;
-            cursor: pointer;
-        }
-        .btn:hover {
-            background-color: #45a049;
-        }
-        .volver {
-            margin-top: 20px;
-            display: inline-block;
-        }
-    </style>
-</head>
-<body>
 
-<h2>🛒 Carrito de Compras</h2>
-
-<?php if (empty($_SESSION['carrito'])): ?>
-    <p>Tu carrito está vacío. <a href="ver_tienda.php" class="btn">Ver productos</a></p>
-<?php else: ?>
-    <table>
-        <tr>
-            <th>Producto</th>
-            <th>Precio Unitario</th>
-            <th>Cantidad</th>
-            <th>Subtotal</th>
-            <th>Quitar</th>
-        </tr>
-        <?php $total = 0; ?>
-        <?php foreach ($_SESSION['carrito'] as $id => $cantidad):
-            $producto = $productos[$id];
-            $subtotal = $producto['Precio'] * $cantidad;
-            $total += $subtotal;
-        ?>
-        <tr>
-            <td><?= $producto['Nombre'] ?></td>
-            <td>$<?= number_format($producto['Precio'], 2) ?></td>
-            <td>
-                <input type="number" min="1" value="<?= $cantidad ?>" data-id="<?= $id ?>" class="cambio-cantidad">
-            </td>
-            <td>$<?= number_format($subtotal, 2) ?></td>
-            <td><a href="actualizar_carrito.php?accion=quitar&id=<?= $id ?>">❌</a></td>
-        </tr>
-        <?php endforeach; ?>
-    </table>
-    <div class="total">
-        <strong>Total: $<?= number_format($total, 2) ?></strong>
-    </div>
-    <br>
-    <a href="ver_tienda.php" class="btn volver">← Seguir comprando</a>
-<?php endif; ?>
-
-<script>
-document.querySelectorAll('.cambio-cantidad').forEach(input => {
-    input.addEventListener('change', () => {
-        const id = input.dataset.id;
-        const cantidad = input.value;
-
-        fetch('actualizar_carrito.php', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: `id=${id}&cantidad=${cantidad}`
-        }).then(res => res.text())
-          .then(() => location.reload());
-    });
-});
-</script>
-
-</body>
-</html>

@@ -2,20 +2,22 @@
 session_start();
 include 'db.php';
 
-// Verifica si es administrador
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+// Verifica que el usuario sea administrador
+if (!isset($_SESSION['role']) || strtolower($_SESSION['role']) !== 'administrador') {
     header('Location: login.php');
     exit;
 }
 
-// Verifica que haya un ID válido para marcar como entregado
 if (isset($_GET['entregar'])) {
     $id = intval($_GET['entregar']);
-    $sql = "UPDATE pedidos SET entregado = 1 WHERE id = $id";
-    $conn->query($sql);
+
+    // Usa prepared statement para seguridad
+    $stmt = $conn->prepare("UPDATE pedido SET Entregado = 1 WHERE IdPedido = ?");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $stmt->close();
 }
 
-// Redirecciona de nuevo al panel de pedidos
+// Redirige al panel de administración de pedidos
 header('Location: admin_pedidos.php');
 exit;
-?>

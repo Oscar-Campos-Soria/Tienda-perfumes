@@ -1,10 +1,14 @@
-<?php
+<?php 
 session_start();
 include 'db.php';
-include 'log_helper.php'; // ✅ Asegúrate de tener este archivo para registrar logs
+// include 'log_helper.php'; // Si usas triggers NO es necesario, ¡si quieres auditoría doble, lo puedes dejar!
 
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+// Solo permitir acceso a administradores
+if (!isset($_SESSION['role']) || strtolower($_SESSION['role']) !== 'administrador') {
     die("Acceso denegado.");
+}
+if (!isset($_SESSION['id_usuario'])) {
+    die("Usuario no autenticado correctamente.");
 }
 
 if (!isset($_GET['id'])) {
@@ -12,23 +16,40 @@ if (!isset($_GET['id'])) {
 }
 
 $id = intval($_GET['id']);
-$sql = "SELECT * FROM productos WHERE Id = ?";
+
+// Obtener producto a editar
+$sql = "SELECT * FROM producto WHERE IdProducto = ?";
 $stmt = $conn->prepare($sql);
 $stmt->bind_param("i", $id);
 $stmt->execute();
 $producto = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 
+if (!$producto) {
+    die("Producto no encontrado.");
+}
+
+// Obtener opciones de presentación para el select
+$presentaciones = [];
+$sql_pres = "SELECT IdPresentacion, Nombre FROM presentacion ORDER BY Nombre ASC";
+$res_pres = $conn->query($sql_pres);
+if ($res_pres && $res_pres->num_rows > 0) {
+    while ($fila = $res_pres->fetch_assoc()) {
+        $presentaciones[] = $fila;
+    }
+}
+
+// Procesar formulario de actualización
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $nombre = trim($_POST['nombre']);
     $descripcion = trim($_POST['descripcion']);
     $precio = floatval($_POST['precio']);
     $cantidad = intval($_POST['cantidad']);
     $categoria = trim($_POST['categoria']);
-    $presentacion = trim($_POST['presentacion']);
-    $imagen = $producto['imagen']; // por defecto se mantiene la anterior
+    $presentacion = intval($_POST['presentacion']);
+    $imagen = $producto['Imagen']; // Mantener la imagen anterior por defecto
 
-    // Si se sube nueva imagen
+    // Validar y subir nueva imagen si se envió
     if (isset($_FILES['imagen']) && $_FILES['imagen']['error'] === UPLOAD_ERR_OK) {
         $permitidos = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
         $tamanoMaximo = 2 * 1024 * 1024; // 2MB
@@ -39,7 +60,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!in_array($tipo, $permitidos)) {
             die("❌ Tipo de imagen no permitido. Usa JPG, PNG, GIF o WEBP.");
         }
-
         if ($tamano > $tamanoMaximo) {
             die("❌ La imagen excede el tamaño máximo de 2MB.");
         }
@@ -49,9 +69,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ruta_destino = 'imagenes/' . $nombre_imagen;
 
         if (move_uploaded_file($_FILES['imagen']['tmp_name'], $ruta_destino)) {
-            // Eliminar la imagen anterior si existe
-            if (!empty($producto['imagen']) && file_exists('imagenes/' . $producto['imagen'])) {
-                unlink('imagenes/' . $producto['imagen']);
+            // Eliminar imagen anterior si existe
+            if (!empty($producto['Imagen']) && file_exists('imagenes/' . $producto['Imagen'])) {
+                unlink('imagenes/' . $producto['Imagen']);
             }
             $imagen = $nombre_imagen;
         } else {
@@ -59,17 +79,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    $sql = "UPDATE productos SET Nombre = ?, descripcion = ?, Precio = ?, Cantidad = ?, Categoria = ?, Presentacion = ?, imagen = ? WHERE Id = ?";
+    // Obtener el ID del usuario que está modificando (importante)
+    $id_usuario_modifica = $_SESSION['id_usuario'];
+
+    // Actualizar producto: ahora sí actualiza también el usuario y la fecha de modificación
+    $sql = "UPDATE producto SET Nombre = ?, Descripcion = ?, Precio = ?, Cantidad = ?, Categoria = ?, IdPresentacion = ?, Imagen = ?, IdUsuarioModifica = ?, FechaModifica = NOW() WHERE IdProducto = ?";
     $stmt = $conn->prepare($sql);
-    $stmt->bind_param("ssdisssi", $nombre, $descripcion, $precio, $cantidad, $categoria, $presentacion, $imagen, $id);
+    $stmt->bind_param("ssdisssii", $nombre, $descripcion, $precio, $cantidad, $categoria, $presentacion, $imagen, $id_usuario_modifica, $id);
 
     if ($stmt->execute()) {
-        // ✅ Registro en logs
-        $usuario = $_SESSION['username'] ?? 'desconocido';
-        $accion = "Editó el perfume '$nombre' (ID: $id)";
-        registrar_log($conn, $usuario, $accion);
-
         echo "<script>alert('✅ Producto actualizado correctamente.'); window.location.href = 'listar_productos.php';</script>";
+        exit;
     } else {
         echo "Error al actualizar: " . $stmt->error;
     }
@@ -80,67 +100,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="UTF-8" />
     <title>Editar Perfume</title>
     <style>
-        body {
-            font-family: Arial;
-            background-color: #f4f4f4;
-            padding: 40px;
-        }
-
+        body { font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 40px; }
         form {
-            max-width: 600px;
-            margin: auto;
-            background-color: #fff;
-            padding: 25px;
-            border-radius: 8px;
-            box-shadow: 0 0 12px rgba(0,0,0,0.1);
+            max-width: 600px; margin: auto; background-color: #fff;
+            padding: 25px; border-radius: 8px; box-shadow: 0 0 12px rgba(0,0,0,0.1);
         }
-
-        h2 {
-            text-align: center;
-            color: #333;
-        }
-
-        label {
-            font-weight: bold;
-        }
-
+        h2 { text-align: center; color: #333; margin-bottom: 20px; }
+        label { font-weight: bold; display: block; margin-top: 10px; }
         input, textarea, select {
-            width: 100%;
-            padding: 10px;
-            margin-top: 8px;
-            margin-bottom: 20px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
+            width: 100%; padding: 10px; margin-top: 6px; margin-bottom: 20px;
+            border: 1px solid #ccc; border-radius: 5px; font-size: 14px;
         }
-
         button {
-            background-color: #007bff;
-            color: white;
-            padding: 12px;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            width: 100%;
+            background-color: #007bff; color: white; padding: 12px; border: none;
+            border-radius: 5px; cursor: pointer; width: 100%;
+            font-size: 16px;
         }
-
-        button:hover {
-            background-color: #0056b3;
-        }
-
+        button:hover { background-color: #0056b3; }
         .volver {
-            display: block;
-            text-align: center;
-            margin-top: 15px;
-            text-decoration: none;
-            color: #dc3545;
+            display: block; text-align: center; margin-top: 15px;
+            text-decoration: none; color: #dc3545; font-weight: bold;
         }
-
         img {
-            max-width: 100px;
-            margin-bottom: 10px;
+            max-width: 150px; margin-bottom: 10px; border-radius: 8px;
             display: block;
         }
     </style>
@@ -148,45 +133,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <body>
 
 <h2>Editar Perfume</h2>
+
 <form method="POST" enctype="multipart/form-data">
-    <label>Nombre:</label>
-    <input type="text" name="nombre" value="<?= htmlspecialchars($producto['Nombre']) ?>" required>
+    <label for="nombre">Nombre:</label>
+    <input type="text" name="nombre" id="nombre" value="<?= htmlspecialchars($producto['Nombre']) ?>" required>
 
-    <label>Descripción:</label>
-    <textarea name="descripcion" required><?= htmlspecialchars($producto['descripcion']) ?></textarea>
+    <label for="descripcion">Descripción:</label>
+    <textarea name="descripcion" id="descripcion" required><?= htmlspecialchars($producto['Descripcion']) ?></textarea>
 
-    <label>Precio:</label>
-    <input type="number" name="precio" step="0.01" value="<?= $producto['Precio'] ?>" required>
+    <label for="precio">Precio:</label>
+    <input type="number" step="0.01" name="precio" id="precio" value="<?= $producto['Precio'] ?>" required>
 
-    <label>Cantidad:</label>
-    <input type="number" name="cantidad" value="<?= $producto['Cantidad'] ?>" required>
+    <label for="cantidad">Cantidad:</label>
+    <input type="number" name="cantidad" id="cantidad" value="<?= $producto['Cantidad'] ?>" required>
 
-    <label>Categoría:</label>
-    <select name="categoria" required>
+    <label for="categoria">Categoría:</label>
+    <select name="categoria" id="categoria" required>
         <option value="caballero" <?= $producto['Categoria'] === 'caballero' ? 'selected' : '' ?>>Caballero</option>
         <option value="dama" <?= $producto['Categoria'] === 'dama' ? 'selected' : '' ?>>Dama</option>
         <option value="mixto" <?= $producto['Categoria'] === 'mixto' ? 'selected' : '' ?>>Mixto</option>
     </select>
 
-    <label>Presentación:</label>
-    <select name="presentacion" required>
-        <option value="completo" <?= $producto['Presentacion'] === 'completo' ? 'selected' : '' ?>>Completo</option>
-        <option value="5ml" <?= $producto['Presentacion'] === '5ml' ? 'selected' : '' ?>>5 ml</option>
-        <option value="10ml" <?= $producto['Presentacion'] === '10ml' ? 'selected' : '' ?>>10 ml</option>
+    <label for="presentacion">Presentación:</label>
+    <select name="presentacion" id="presentacion" required>
+        <?php foreach ($presentaciones as $p): ?>
+            <option value="<?= $p['IdPresentacion'] ?>" <?= $producto['IdPresentacion'] == $p['IdPresentacion'] ? 'selected' : '' ?>>
+                <?= htmlspecialchars($p['Nombre']) ?>
+            </option>
+        <?php endforeach; ?>
     </select>
 
     <label>Imagen actual:</label>
-    <?php if ($producto['imagen']): ?>
-        <img src="imagenes/<?= htmlspecialchars($producto['imagen']) ?>" alt="Imagen actual">
+    <?php if ($producto['Imagen']): ?>
+        <img src="imagenes/<?= htmlspecialchars($producto['Imagen']) ?>" alt="Imagen actual">
     <?php else: ?>
-        <p>Sin imagen</p>
-    <?php endif; ?>
+        <p>Sin imagen disponible</p>
+    <?php endif; ?> 
 
-    <label>¿Cambiar imagen?</label>
-    <input type="file" name="imagen" accept="image/*">
+    <label for="imagen">Cambiar imagen:</label>
+    <input type="file" name="imagen" id="imagen" accept="image/*">
 
     <button type="submit">Guardar cambios</button>
-    <a href="listar_productos.php" class="volver">Cancelar</a>
+    <a href="listar_producto.php" class="volver">Cancelar</a>
 </form>
 
 </body>
